@@ -1,0 +1,114 @@
+---
+title: "WMNFAllomClean"
+author: "Jacob Levine"
+date: "7/14/2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE) 
+root.dir = '~/Desktop/WMNFAllometry'
+```
+
+```{r}
+## load packages
+library(mgcv)
+library(plyr)
+library(visreg)
+library(ggplot2)
+library(MuMIn)
+library(reticulate)
+```
+
+# Run Function Definition Script
+
+```{r}
+source("WMNFFunctionDef.R")
+```
+
+# Run Data Cleaning Script
+
+```{r}
+source("WMNFDataClean.R")
+```
+
+# Model Building
+
+#### Define Function to Create List of linear models:
+
+Comment out model selection for now to simplify codefile.
+
+```{r}
+
+## comparing all possible combinations of linear models for the dataset using dredge:
+# options(na.action = "na.fail")
+# model1 <- lm(logABOVEg ~ logDBHcm * logHTcm * SPP4 * STANDAGE, data = allom_data_trunc)
+# model_sel_linear_AIC <- dredge(model1, rank = AIC)
+
+## build, run and perform model selection on models
+# model_sel_gam_AIC <- allom_gams(data1 = allom_data_trunc, y = "logABOVEg", x = c("logDBHcm", "logHTcm", "logPVcm3"), by = c("SPP4", "STANDAGE", "SPPSTAGE"), rank = "AIC")
+
+```
+
+```{r}
+
+# model_sel_results_AIC <- merge(model_sel_linear_AIC, model_sel_gam_AIC)
+# head(model_sel_results_AIC)
+
+```
+
+## Define model
+``` {r}
+allom_model <- gam(logABOVEg ~ s(logDBHcm, by = SPPSTAGE, k = 4) + s(logHTcm, by = SPPSTAGE, k = 4) + SPP4 * STANDAGE, data = allom_data_trunc, qr=FALSE)
+
+summary(allom_model)
+
+```
+
+## Plotting the model:
+
+#### plot predictions vs observed for all combinations of SPP and STANDAGE:
+```{r}
+
+plot_pred(data = allom_data_trunc, model = allom_model)
+
+```
+
+#### plot predictions for case that is most fully crossed
+```{r}
+fullcross_data <- subset(allom_data_trunc, SPP4 != "ACPE" & SPP4 != "PIRU" & STANDAGE != "23" & STANDAGE != "98")
+
+plot_pred(data = fullcross_data, model = allom_model)
+
+```
+
+
+```{r}
+anova(allom_model)
+## looks like the SPP4 parametric terms arent significant.  STANDAGE and interactions are both significant.
+
+allom_p.coeff <- data.frame(summary(allom_model)$p.coeff)
+
+coefnames <- as.factor(attributes(summary(allom_model)$p.coeff)$names)
+coefvals <- summary(allom_model)$p.coeff
+attributes(coefvals) <- NULL
+
+allom_coef <- data.frame(coefnames, coefvals)
+
+allom_coefSTANDAGE <- allom_coef[9:14, ]
+allom_coefSPP4 <- allom_coef[2:8, ]
+
+## there appears to be some sort of pattern here
+ggplot(allom_coefSTANDAGE, aes(x = coefnames, y = coefvals)) +
+  geom_point()  
+  
+ggplot(allom_coefSPP4, aes(x = coefnames, y = coefvals)) + 
+  geom_point()
+
+## x axis is illegible, but could be useful for seeing larger trends
+ggplot(allom_coef, aes(x = coefnames, y = coefvals)) + 
+  geom_point()
+
+```

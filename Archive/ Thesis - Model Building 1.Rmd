@@ -1,0 +1,635 @@
+---
+title: "Thesis - Model Building 1"
+author: "Jacob Levine"
+date: "2/6/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE) 
+root.dir = '~/Desktop/References_allometry'
+```
+
+```{r}
+## load packages
+library(mgcv)
+library(plyr)
+library(visreg)
+library(ggplot2)
+library(MuMIn)
+library(reticulate)
+```
+
+# Model Building
+
+```{r}
+## read in the main data
+allom_data <- read.csv('~/Desktop/References_allometry/WMNF_allom5.csv', header = TRUE)
+str(allom_data)
+
+allom_data[, "STANDAGE"] <- as.factor(allom_data[, "STANDAGE"])
+
+```
+
+```{r}
+
+## Remove the data from the 98 year old stand so that all of the data are comparable:
+allom_data_Y <- subset(allom_data, STANDAGE != "98years")
+str(allom_data_Y)
+
+max(allom_data_Y$DBHcm)
+
+## get subset of data which includes trees in 98year stand which are smaller than the ## largest trees in the younger stands.
+
+allom_data_trunc <- subset(allom_data, DBHcm <= 66)
+
+```
+
+```{r}
+
+## log transform aboveground biomass:
+allom_data_trunc$logABOVEg <- log(allom_data_trunc$ABOVEg)
+ggplot(allom_data_trunc, aes(x = DBHcm, y = logABOVEg)) +
+  geom_jitter() +
+  geom_smooth(size = 0.5)
+
+## lets try taking the log transformation of both variables:
+allom_data_trunc$logDBHcm <- log(allom_data_trunc$DBHcm)
+ggplot(allom_data_trunc, aes(x = logDBHcm, y = logABOVEg)) +
+  geom_jitter() +
+  geom_smooth(size = 0.5)
+
+## Create SPPSTAGE in order to fully cross in GAM
+for (i in 1:length(allom_data_trunc$SPP4)) {
+  allom_data_trunc$SPPSTAGE[i] <- paste(allom_data_trunc$SPP4[i], allom_data_trunc$STANDAGE[i])
+}
+
+allom_data_trunc$SPPSTAGE <- as.factor(allom_data_trunc$SPPSTAGE)
+
+
+## log transform HTcm:
+allom_data_trunc$logHTcm <- log(allom_data_trunc$HTcm)
+
+## log transform PVcm3
+allom_data_trunc$logPVcm3 <- log(allom_data_trunc$PVcm3)
+
+## remove NA values of biomass:
+allom_data_trunc <- subset(allom_data_trunc, logABOVEg != "NA")
+
+```
+
+
+```{r}
+
+## look at how many data points we have for each species.  ACRU and PIRU seem low. 
+## Let's create a dataset with them removed to compare to one with them included.
+
+count(allom_data_trunc$SPP4)
+
+allom_data_truncSPP4 <- subset(allom_data_trunc, SPP4 != "ACRU")
+allom_data_truncSPP4 <- subset(allom_data_truncSPP4, SPP4 != "PIRU")
+count(allom_data_truncSPP4$SPP4)
+
+## make another subset of the data with only SPPSTAGE levels that have more than 10 data points.
+
+SPPSTAGE_counts <- data.frame(count(allom_data_trunc$SPPSTAGE))
+SPPSTAGE_counts <- subset(SPPSTAGE_counts, freq >= 10)
+
+SPPSTAGE_list <- as.factor(SPPSTAGE_counts$x)
+
+allom_data_truncSPPSTAGE <- subset(allom_data_trunc, (allom_data_trunc$SPPSTAGE %in% SPPSTAGE_list) == TRUE)
+
+allom_data_truncSPPSTAGE$SPPSTAGE
+
+## Try STANDAGE as numerical
+
+allom_data_truncSTANDAGENUM <- allom_data_trunc
+allom_data_truncSTANDAGENUM$STANDAGE <- as.numeric(allom_data_trunc$STANDAGE)
+
+```
+
+Perhaps in the future we could keep the small trees only from the 98 year data as there is some basis to comparison, although its perhaps still too large of a gap to justify any conclusions.
+
+
+It looks like we get something roughly linear with the loglog transformation of DBH vs BIOMASS.  Based on a visual inspection alone, it appears that the heteroscedasticity issue has been at least significantly reduced. 
+
+#### Define Function to Create List of Models (linear and GAM):
+
+A note:  A more experienced/clever programmer could probably do this in 1/4 the lines of code I used.  I am no such programmer, so this is likely the most overcomplicated and inefficient method of doing this.  Oh well, maybe some day...
+
+```{r}
+
+## comparing all possible combinations of linear models for the dataset using AIC and 
+## AICc:
+## knowledge of the dredge function may have been useful/done the work for me for the gam 
+## models
+options(na.action = "na.fail")
+model1 <- lm(logABOVEg ~ logDBHcm * logHTcm * SPP4 * STANDAGE, data = allom_data_trunc)
+model_sel_linear_AIC <- dredge(model1, rank = AIC)
+model_sel_linear_AICc <- dredge(model1, rank = AICc)
+
+
+## Function to write out all possible model terms, to be combined in later funcitons:
+build_model_terms <- function(x, by, op) {
+  s_terms <- character()
+  int_terms <- character()
+  ## for loops to write all possible smooth terms:
+  ## l is dummy variable specifying inclusion of id = 1:
+  for (l in 1:2) {
+    if (l == 1) {
+      ## k is a dummy variable indicating whether or not theres an interaction term:
+      for (k in 1:2) {
+        if (k == 1) {
+          for (i in 1:length(x)) {
+            for (j in 1:length(by)) {
+              s_termtext <- paste0("s(", x[i], ", k = 4", ", by =", by[j], " ,id = 1", ")")
+              s_terms <- c(s_terms, s_termtext)
+              }
+            } 
+          }
+        else if (k == 2) {
+          for (j in 1:length(by)) {
+            s_termtext <- paste0("s(", x[1], ", ", x[2], ", k = 4", ", by =", by[j], " ,id = 1", ")")
+            s_terms <- c(s_terms, s_termtext)
+            }
+          }
+        }
+      }
+    else if (l == 2) {
+      ## k is a dummy variable indicating whether or not theres an interaction term:
+      for (k in 1:2) {
+        if (k == 1) {
+          for (i in 1:length(x)) {
+            for (j in 1:length(by)) {
+              s_termtext <- paste0("s(", x[i], ", k = 4", ", by =", by[j], ")")
+              s_terms <- c(s_terms, s_termtext)
+              }
+            } 
+          }
+        else if (k == 2) {
+          for (j in 1:length(by)) {
+            s_termtext <- paste0("s(", x[1], ", ", x[2], ", k = 4", ", by =", by[j], ")")
+            s_terms <- c(s_terms, s_termtext)
+            }
+          }
+        }
+      }
+    }
+  ## k is a dummy variable indicating whether there are 1 or 2 intercept terms
+  for (k in 1:2) {
+      if (k == 1) {
+        for (i in 1:length(by)) {
+          by1 <- by[! by %in% " "]
+          if (!is.na(by1[i])) {
+            int_termtext <- paste0(by[i])
+            int_terms <- c(int_terms, int_termtext)
+          }
+          else {}
+        }  
+      }
+      else if (k == 2) {
+        for (l in 1:2) {
+          int_termtext <- paste0(by[1], op[l], by[2])
+          int_terms <- c(int_terms, int_termtext)
+        }
+      }
+    }
+  model_terms <- list(int_terms, s_terms)
+  return(model_terms)
+  }
+
+
+## Function builds models with one s() term - including those with two explanatory variables and an 
+## interaction:
+build_models_1 <- function(y, x, by, int_terms, s_terms) {
+  models <- character()
+  for (i in 1:length(s_terms)) {
+    for (j in 1:length(int_terms)) {
+      ## k is a dummy variable that indicates whether there are 1 or two intercept terms
+      for (k in 1:2) {
+        if (k == 1) {
+          ## When we have only 1 intercept term:
+          if (!grepl("\\+", int_terms[j]) && !grepl("\\*", int_terms[j])) {
+            if (grepl(int_terms[j], s_terms[i]) && !grepl("SPPSTAGE", s_terms[i])) {
+              newmodeltext <- paste0(y, "~ ", s_terms[i], " + ", int_terms[j])
+              newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+              models <- c(models, newmodel)
+            }
+            else if (grepl("SPPSTAGE", s_terms[i])) {
+              newmodeltext <- paste0(y, " ~ ", s_terms[i], " + ", "SPPSTAGE")
+              newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+              models <- c(models, newmodel)
+            }
+            else if (grepl("by = )", s_terms[i]) && !grepl("SPPSTAGE", int_terms[j])) {
+              newmodeltext <- paste0(y, " ~ ", s_terms[i], " + ", int_terms[j])
+              newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+              models <- c(models, newmodel)
+            }
+          }  
+        }
+        else if (k == 2) {
+          if (grepl("SPPSTAGE", s_terms[i])) {}
+          else if (grepl("\\+", int_terms[j]) | grepl("\\*", int_terms[j])) {
+            newmodeltext <- paste0(y, " ~ ", s_terms[i], " + ", int_terms[j])
+            newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+            models <- c(models, newmodel)
+          }
+        }
+      }
+    }  
+  }
+  models <- unique(models)
+  return(models)
+}
+
+## Function to build models for case with two s() terms, no interactions:
+## I got a bit carried away with this one I think.
+build_models_2 <- function(y, x, by, int_terms, s_terms) {
+  models <- character()
+  ## create a vector of DBH s() terms and one of HT s() terms
+  dbh_terms <- character()
+  ht_terms <- character()
+  for (i in 1:length(s_terms)) {
+    if (grepl("logDBHcm", s_terms[i]) && !grepl("logHTcm", s_terms[i])) {
+      dbh_terms <- c(dbh_terms, s_terms[i])
+    }
+    else if (grepl("logHTcm", s_terms[i]) && !grepl("logDBHcm", s_terms[i])) {
+      ht_terms <- c(ht_terms, s_terms[i])
+    }
+  }
+  ## Make sure there are no duplicates
+  dbh_terms <- unique(dbh_terms)
+  ht_terms <- unique(ht_terms)
+  
+  for (i in 1:length(dbh_terms)) {
+    for (l in 1:length(ht_terms)) {
+      for (j in 1:length(int_terms)) {
+        for (k in 1:2) {
+          if (k == 1) {
+            ## When we have only 1 intercept term (except with special case of SPP4STANDAGE):
+            if (!grepl("\\+", int_terms[j]) && !grepl("\\*", int_terms[j])) {
+              ## for the case without SPP4STANDAGE, require that both dbh_term and ht_term are represented in int_term:
+              if ((grepl(int_terms[j], dbh_terms[i]) && grepl(int_terms[j], ht_terms[l])) | (grepl(int_terms[j], paste0(dbh_terms[i], ht_terms[l])) && grepl("by = )", paste0(dbh_terms[i], ht_terms[l]))) && !grepl("SPPSTAGE", paste0(dbh_terms[i], ht_terms[l]))) {
+                newmodeltext <- paste0(y, " ~ ", dbh_terms[i], " + ", ht_terms[l], " + ", int_terms[j])
+                newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+                models <- c(models, newmodel)
+              }
+              ## for the case with SPPSTAGE:
+              else if (grepl("SPPSTAGE", paste0(dbh_terms[i], ht_terms[i]))) {
+                ## for the case with SPP4STANDAGE and different by term, require that diff by term is represented in int_term
+                if (grepl(int_terms[j], paste0(dbh_terms[i], ht_terms[l])) && int_terms[j] != "SPPSTAGE") {
+                  newmodeltext <- paste0(y, " ~ ", dbh_terms[i], " + ", ht_terms[l], " + ", "SPPSTAGE", " + ", int_terms[j])
+                  newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+                  models <- c(models, newmodel)
+                }
+                ## for the case with only SPPSTAGE as a by term, only SPPSTAGE as an int_term
+                else if (grepl(int_terms[j], dbh_terms[i]) && grepl(int_terms[j], ht_terms[l])) {
+                  newmodeltext <- paste0(y, " ~ ", dbh_terms[i], " + ", ht_terms[l], " + ", "SPPSTAGE")
+                  newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+                  models <- c(models, newmodel)
+                }
+              }
+              ## for the case with empty by terms
+              else if (grepl("by = )", dbh_terms[i]) && grepl("by = )", ht_terms[l]) && !grepl("SPPSTAGE", int_terms[j])) {
+                newmodeltext <- paste0(y, " ~ ", dbh_terms[i], " + ", ht_terms[l], " + ", int_terms[j])
+                newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+                models <- c(models, newmodel)
+              }
+            }  
+          }
+          else if (k == 2) {
+            if (grepl("SPPSTAGE", paste0(int_terms[j], dbh_terms[i], ht_terms[l]))) {}
+            else if (grepl("\\+", int_terms[j]) | grepl("\\*", int_terms[j])) {
+              newmodeltext <- paste0(y, " ~ ", dbh_terms[i], " + ", ht_terms[l], " + ", int_terms[j])
+              newmodel <- as.formula(parse(text = newmodeltext)[[1]])
+              models <- c(models, newmodel)
+            }
+          }
+        }
+      }  
+    }
+  }
+  models <- unique(models)
+  return(models)
+}
+
+## Function to put it all together:
+allom_gams <- function(data1, y, x, by, rank = "AIC") {
+  ## y, x and by must be input as concatenated string variables
+  x <- c("logDBHcm", "logHTcm", "logPVcm3")
+  by <- c("SPP4", "STANDAGE", "SPPSTAGE")
+  by <- append(by, " ")
+  op <- c(" + ", " * ")
+  
+  ## call function to build models for case with one explanatory variable
+  model_terms <- build_model_terms(x = x, by = by, op = op)
+  int_terms <- model_terms[[1]]
+  s_terms <- model_terms[[2]]
+  models_1 <- build_models_1(y = y, x = x, by = by, int_terms = int_terms, s_terms = s_terms)
+  models_2 <- build_models_2(y = y, x = x, by = by, int_terms = int_terms, s_terms = s_terms)
+  models <- c(models_1, models_2)
+  
+  ## fit gam models:
+  for (i in 1:length(models)) {
+    assign(paste0("model", i), gam(models[[i]], data = data1))
+  }
+  
+  model_list <- character()
+  for (i in 1:length(models)) {
+    if (i < max(length(models))) {
+      model_list <- paste0(model_list, "model", i, ", ")
+    }
+    else {
+      model_list <- paste0(model_list, "model", i)
+    }
+  }
+  results <- eval(parse(text = paste("model.sel(", model_list, ", rank =", rank, ")")))
+  return(results)   
+}
+
+## build, run and perform model selection on models
+model_sel_gam_AIC <- allom_gams(data1 = allom_data_trunc, y = "logABOVEg", x = c("logDBHcm", "logHTcm", "logPVcm3"), by = c("SPP4", "STANDAGE", "SPPSTAGE"), rank = "AIC")
+
+## Check model selection on dataset without poorly represented species to make sure results don't change:
+# model_sel_gam_AICtruncSPP4 <- allom_gams(data1 = allom_data_truncSPP4, y = "logABOVEg", x = c("logDBHcm", "logHTcm", "logPVcm3"), by = c("SPP4", "STANDAGE", "SPPSTAGE"), rank = "AIC")
+# 
+# ## Check model selection on dataset without poorly represented species/standage combos:
+# model_sel_gam_AICtruncSPPSTAGE <- allom_gams(data1 = allom_data_truncSPPSTAGE, y = "logABOVEg", x = c("logDBHcm", "logHTcm", "logPVcm3"), by = c("SPP4", "STANDAGE", "SPPSTAGE"), rank = "AIC")
+# 
+# ## Check model selection when STANDAGE treated as numeric instead of factor:
+# model_sel_gam_AICtruncSTANDAGENUM <- allom_gams(data1 = allom_data_truncSTANDAGENUM, y = "logABOVEg", x = c("logDBHcm", "logHTcm", "logPVcm3"), by = c("SPP4", "STANDAGE", "SPPSTAGE"), rank = "AIC")
+
+
+```
+
+
+Here are the results when using AIC.  The output becomes quite cumbersome when linear and gam models are combined because of the number of possible terms between the two model families.  The four models with the lowest AIC score are gam models, the fifth being linear.  
+
+Here they are listed out in a more readable format:
+
+######1) logABOVEg ~ s(logDBHcm, by = SPPSTAGE) + s(logHTcm, by = SPPSTAGE) + SPPSTAGE
+
+######2) logABOVEg ~ s(logDBHcm, by = SPPSTAGE) + s(logHTcm, by = SPP4) + SPPSTAGE
+
+######3) logABOVEg ~ s(logDBHcm, by = SPPSTAGE) + s(logHTcm, by = STANDAGE) + SPPSTAGE
+
+######4) logABOVEg ~ s(logPVcm3, by = SPPSTAGE) + SPPSTAGE
+
+######5) logABOVEg ~ logDBHcm + logHTcm + SPP4 + STANDAGE + logDBHcm:SPP4 + logDBH:STANDAGE + 
+######        logHT:SPP4 + logHT:STANDAGE + SPP4:STANDAGE + logHT:SPP4:STANDAGE
+
+
+```{r}
+
+model_sel_results_AIC <- merge(model_sel_linear_AIC, model_sel_gam_AIC)
+head(model_sel_results_AIC)
+
+```
+
+``` {r}
+allom_model <- gam(logABOVEg ~ s(logDBHcm, by = SPPSTAGE, k = 4) + s(logHTcm, by = SPPSTAGE, k = 4) + SPP4 * STANDAGE, data = allom_data_trunc, qr=FALSE)
+
+summary(allom_model)
+
+```
+
+## Plotting the model:
+```{r}
+plot(allom_model, scale=0)
+## doesn't seem to be any discernible pattern, however it is hard to determine with 42 plots
+
+## Plotting predicted values, observed values, and confidence interval for each combination of spp and standage:
+
+```
+
+Write function to plot predictions vs observed for all combinations of SPP and STANDAGE:
+```{r}
+plot_pred <- function(data, model, pred.length = 50, plotcov = c("logDBHcm, logHTcm"), tolerance = 3) {
+  ## Drop unused levels from covariate vectors:
+  data$SPP4 <- droplevels(data$SPP4)
+  data$STANDAGE <- droplevels(data$STANDAGE)
+  
+  ## Build predicted values into dataframe:
+  numspp <- length(levels(data$SPP4))
+  numstage <- length(levels(data$STANDAGE))
+  
+  ## write in STANDAGE levels for each SPP
+  stagevec <- rep(levels(data$STANDAGE), numspp)
+  sppvec <- rep(levels(data$SPP4), each = numstage)
+
+  ## combine into dataframe
+  fac_data <- data.frame(sppvec, stagevec)
+  
+  ## get x scale for each STANDAGE and covariate
+  STAGE <- levels(data$STANDAGE)
+  minDBH <- numeric(length = length(STAGE))
+  maxDBH <- numeric(length = length(STAGE))
+  minHT <- numeric(length = length(STAGE))
+  maxHT <- numeric(length = length(STAGE))
+  ranges <- data.frame(STAGE, minDBH, maxDBH, minHT, maxHT)
+  
+  for (i in 1:length(levels(data$STANDAGE))) {
+    newsub <- subset(data, STANDAGE == levels(data$STANDAGE)[i])
+    ranges$minDBH[i] <- min(newsub$logDBHcm)
+    ranges$maxDBH[i] <- max(newsub$logDBHcm)
+    ranges$minHT[i] <- min(newsub$logHTcm)
+    ranges$maxHT[i] <- max(newsub$logHTcm)
+  }
+  
+  ## set up ylims 
+  minlogABOVEg <- numeric()
+  maxlogABOVEg <- numeric()
+  for (j in 1:length(levels(data$SPP4))) {
+  newsub <- subset(data, SPP4 == levels(data$SPP4)[j])
+    for (i in 1:length(levels(data$STANDAGE))) {
+      newsub1 <- subset(newsub, STANDAGE == levels(data$STANDAGE)[i])
+      minlogABOVEg <- c(minlogABOVEg, min(newsub1$logABOVEg))
+      maxlogABOVEg <- c(maxlogABOVEg, max(newsub1$logABOVEg))
+    }
+  }
+  minlogABOVEg <- rep(minlogABOVEg, each = pred.length)
+  maxlogABOVEg <- rep(maxlogABOVEg, each = pred.length)
+  
+  ## write in regularly spaces covariate values to predict upon
+  logDBHcm <- numeric()
+  logHTcm <- numeric()
+  for (i in 1:nrow(fac_data)) {
+    range <- subset(ranges, STAGE == stagevec[i])
+    logDBHcm <- c(logDBHcm, seq(range$minDBH, range$maxDBH, length.out = pred.length))
+    logHTcm <- c(logHTcm, seq(range$minHT, range$maxHT, length.out = pred.length))
+  }
+  
+  SPP4 <- rep(fac_data$sppvec, each = pred.length)
+  STANDAGE <- rep(fac_data$stagevec, each = pred.length)
+  
+  new_data <- data.frame(SPP4, STANDAGE, logDBHcm, logHTcm, minlogABOVEg, maxlogABOVEg)
+  
+  ## Create SPPSTAGE variable in new data for prediction
+  for (i in 1:length(new_data$SPP4)) {
+    new_data$SPPSTAGE[i] <- paste(new_data$SPP4[i], new_data$STANDAGE[i])
+  }
+  new_data$SPPSTAGE <- as.factor(new_data$SPPSTAGE)
+  
+  ## Eliminate covariate combinations in predictive data for which there was no observed data
+  del_vec <- character()
+  for (i in 1:nrow(new_data)) {
+    if (!any(grepl(new_data$SPPSTAGE[i], levels(data$SPPSTAGE)))) {
+      new <- rownames(new_data)[i]
+      del_vec <- c(del_vec, new)
+    }
+  }
+  
+  del_vec <- as.numeric(del_vec[!is.na(del_vec)])
+  new_data <- new_data[-del_vec,]
+  
+  ## write predictions to object
+  predicted_data <- predict(model, newdata = new_data, se.fit = TRUE)
+  
+  ## write in predictions and standard errors to dataframe
+  new_data$logABOVEg <- predicted_data$fit
+  new_data$SE <- predicted_data$se.fit
+  new_data$CI.low <- new_data$logABOVEg - predicted_data$se.fit
+  new_data$CI.high <- new_data$logABOVEg + predicted_data$se.fit
+  
+  for (i in 1:nrow(new_data)) {
+    if (new_data$CI.high[i] > new_data$maxlogABOVEg[i]+tolerance) {
+      new_data$CI.high[i] <- NA
+    }
+    if (new_data$CI.low[i] < new_data$minlogABOVEg[i]-tolerance | new_data$CI.low[i] > new_data$maxlogABOVEg[i]+tolerance) {
+      new_data$CI.low[i] <- NA
+    }
+    if (new_data$logABOVEg[i] > new_data$maxlogABOVEg[i]+tolerance) {
+      new_data$logABOVEg[i] <- NA
+    }
+    else if (new_data$logABOVEg[i] < new_data$minlogABOVEg[i]-tolerance) {
+      new_data$logABOVEg[i] <- NA
+    }
+  }
+
+  plots <- list()
+  if (grepl("logDBHcm", plotcov) && grepl("logHTcm", plotcov)) {
+    DBHplot <- ggplot(new_data, aes(logDBHcm, logABOVEg)) +
+                geom_line(size = 1) +
+                geom_line(aes(logDBHcm, CI.high), color = "palevioletred1") +
+                geom_line(aes(logDBHcm, CI.low), color = "palevioletred1") +
+                geom_jitter(data = data, aes(logDBHcm, logABOVEg), size = 0.75) +
+                facet_grid(SPP4 ~ STANDAGE, scales = "free")
+    
+    HTplot  <- ggplot(new_data, aes(logHTcm, logABOVEg)) +
+                geom_line(size = 1) +
+                geom_line(aes(logHTcm, CI.high), color = "palevioletred1") +
+                geom_line(aes(logHTcm, CI.low), color = "palevioletred1") +
+                geom_jitter(data = data, aes(logHTcm, logABOVEg), size = 0.75) +
+                facet_grid(SPP4 ~ STANDAGE, scales = "free")
+    print(DBHplot)
+    print(HTplot)
+  }
+  else if (grepl("logHTcm", plotcov) && !grepl("logDBHcm", plotcov)) {
+    HTplot  <- ggplot(new_data, aes(logHTcm, logABOVEg)) +
+                geom_line(size = 1) +
+                geom_line(aes(logHTcm, CI.high), color = "palevioletred1") +
+                geom_line(aes(logHTcm, CI.low), color = "palevioletred1") +
+                geom_jitter(data = allom_data_trunc, aes(logHTcm, logABOVEg), size = 0.75) +
+                facet_grid(SPP4 ~ STANDAGE, scales = "free")
+    print(HTplot)
+  }
+  else if (grepl("logDBHcm", plotcov) && !grepl("logHTcm", plotcov)) {
+    DBHplot <- ggplot(new_data, aes(logDBHcm, logABOVEg)) +
+                geom_line(size = 1) +
+                geom_line(aes(logDBHcm, CI.high), color = "palevioletred1") +
+                geom_line(aes(logDBHcm, CI.low), color = "palevioletred1") +
+                geom_jitter(data = data, aes(logDBHcm, logABOVEg), size = 0.75) +
+                facet_grid(SPP4 ~ STANDAGE, scales = "free")
+    print(DBHplot)
+  }
+  else {
+    print("error: plot cov must contain either logHTcm, logDBHcm or both")
+  }
+}
+
+plot_pred(data = allom_data_trunc, model = allom_model)
+
+```
+
+
+plot predictions for case that is mostly fully crossed
+```{r}
+fullcross_data <- subset(allom_data_trunc, SPP4 != "ACPE" & SPP4 != "PIRU" & STANDAGE != "23" & STANDAGE != "98")
+
+plot_pred(data = fullcross_data, model = allom_model)
+
+```
+
+
+
+```{r}
+anova(allom_model)
+## looks like the SPP4 parametric terms arent significant.  STANDAGE and interactions are both significant.
+
+allom_p.coeff <- data.frame(summary(allom_model)$p.coeff)
+
+coefnames <- as.factor(attributes(summary(allom_model)$p.coeff)$names)
+coefvals <- summary(allom_model)$p.coeff
+attributes(coefvals) <- NULL
+
+allom_coef <- data.frame(coefnames, coefvals)
+
+allom_coefSTANDAGE <- allom_coef[9:14, ]
+allom_coefSPP4 <- allom_coef[2:8, ]
+
+## there appears to be some sort of pattern here
+ggplot(allom_coefSTANDAGE, aes(x = coefnames, y = coefvals)) +
+  geom_point()  
+  
+ggplot(allom_coefSPP4, aes(x = coefnames, y = coefvals)) + 
+  geom_point()
+
+## x axis is illegible, but could be useful for seeing larger trends
+ggplot(allom_coef, aes(x = coefnames, y = coefvals)) + 
+  geom_point()
+
+```
+
+
+
+
+## with STANDAGE as class numeric (IGNORE FOR NOW)
+```{r}
+
+# allom_p.coeff <- data.frame(summary(allom_model)$p.coeff)
+# 
+# coefnames <- as.factor(attributes(summary(allom_model)$p.coeff)$names)
+# coefvals <- summary(allom_model)$p.coeff
+# attributes(coefvals) <- NULL
+# 
+# allom_coef <- data.frame(coefnames, coefvals)
+# 
+# allom_coefSPP4 <- allom_coef[2:8, ]
+# allom_coefSTANDAGE <- allom_coef[9:14, ]
+# allom_coefSTANDAGE$coefnames <- as.character(allom_coefSTANDAGE$coefnames)
+# 
+# for (i in 1:nrow(allom_coefSTANDAGE)) {
+#   allom_coefSTANDAGE[i, 1] <- gsub("STANDAGE", "", allom_coefSTANDAGE[i, 1])
+# }
+# 
+# allom_coefSTANDAGE$coefnames <- as.numeric(allom_coefSTANDAGE$coefnames)
+# allom_coefSTANDAGE
+# 
+# ggplot(allom_coefSTANDAGE, aes(x = coefnames, y = coefvals)) +
+#   geom_point() 
+# 
+# ggplot(allom_coefSPP4, aes(x = coefnames, y = coefvals)) + 
+#   geom_point()
+# 
+# ## x axis is illegible, but could be useful for seeing larger trends
+# ggplot(allom_coef, aes(x = coefnames, y = coefvals)) + 
+#   geom_point()
+
+
+```
+
+
+
+
+
+
